@@ -1,0 +1,730 @@
+%% ============================================================
+%  SCRIPT DIRECTO - AHORROS GDMTH CON RESULTADOS SIL
+%  Variable base: data4
+%
+%  Columnas:
+%       col 1  -> tiempo [s]
+%       col 9  -> Pred  [W]
+%       col 7  -> P_VSC [W]
+%       col 26 -> Qred  [var]
+%       col 25 -> Qcarga / QsinBESS [var]
+%
+%  Tiempo:
+%       1 s simulacion = 2 h reales
+%
+%  Ventana capacidad invierno:
+%       12.1 <= t <= 14
+%% ============================================================
+
+clearvars -except data4 Data4 DATA4 data_4
+clc
+close all
+
+%% ============================================================
+% 1. CARGA DE VARIABLE SIL
+%% ============================================================
+
+if exist('data4','var')
+    SIL = data4;
+elseif exist('Data4','var')
+    SIL = Data4;
+elseif exist('DATA4','var')
+    SIL = DATA4;
+elseif exist('data_4','var')
+    SIL = data_4;
+else
+    error('No encontré la variable data4, Data4, DATA4 o data_4 en el workspace.');
+end
+
+if istable(SIL)
+    SIL = table2array(SIL);
+elseif isa(SIL,'timeseries')
+    SIL = squeeze(SIL.Data);
+elseif isstruct(SIL) && isfield(SIL,'signals')
+    SIL = SIL.signals.values;
+end
+
+if size(SIL,2) < 26
+    error('La variable data4 debe tener al menos 26 columnas.');
+end
+
+%% ============================================================
+% 2. CONFIGURACION GENERAL
+%% ============================================================
+
+horas_por_segundo = 2;     % 1 s = 2 h reales
+dias_mes = 31;             % octubre
+
+% Si tus señales ya están en kW/kVAr, cambia estos factores a 1.
+factorP = 1e-3;            % W -> kW
+factorQ = 1e-3;            % var -> kVAr
+
+% Tarifas GDMTH OCT-25
+tarifa_base       = 1.0545;   % MXN/kWh
+tarifa_intermedia = 1.8761;   % MXN/kWh
+tarifa_punta      = 2.1259;   % MXN/kWh
+
+cargo_fijo         = 289.74;  % MXN/mes
+cargo_distribucion = 230.35;  % MXN/kW-mes
+cargo_capacidad    = 405.09;  % MXN/kW-mes
+
+FP_min = 0.97;
+
+% Carpeta de guardado
+guardar_figuras = true;
+carpeta_figuras = 'C:\Users\ghloc\OneDrive\Escritorio\OPALRT\Prueba Grid Following\PRUEBA JUNIO GFM\Graficas';
+
+if guardar_figuras && ~exist(carpeta_figuras,'dir')
+    mkdir(carpeta_figuras);
+end
+
+% Estilo
+fontName = 'Times New Roman';
+fontSize = 14;
+axisLineWidth = 1.2;
+
+azul     = [0.0000 0.4470 0.7410];
+naranja  = [0.8500 0.3250 0.0980];
+amarillo = [0.9290 0.6940 0.1250];
+verde    = [0.4660 0.6740 0.1880];
+rojo     = [0.6350 0.0780 0.1840];
+morado   = [0.4940 0.1840 0.5560];
+
+fmtMoney = java.text.DecimalFormat('$#,##0;-$#,##0');
+fmtNum   = java.text.DecimalFormat('#,##0');
+
+%% ============================================================
+% 3. EXTRACCION DE COLUMNAS
+%% ============================================================
+
+t_raw       = SIL(:,1);
+PVSC_raw    = SIL(:,7);
+Pred_raw    = SIL(:,9);
+Qcarga_raw  = SIL(:,25);
+Qred_raw    = SIL(:,26);
+
+% Limitar tiempo de 0 a 24 s
+idx_t = t_raw >= 0 & t_raw <= 24;
+
+t = t_raw(idx_t);
+PVSC_raw = PVSC_raw(idx_t);
+Pred_raw = Pred_raw(idx_t);
+Qcarga_raw = Qcarga_raw(idx_t);
+Qred_raw = Qred_raw(idx_t);
+
+% Asegurar columnas
+t = t(:);
+PVSC_raw = PVSC_raw(:);
+Pred_raw = Pred_raw(:);
+Qcarga_raw = Qcarga_raw(:);
+Qred_raw = Qred_raw(:);
+
+% Conversión
+PVSC_kW = PVSC_raw * factorP;
+Pred_kW = Pred_raw * factorP;
+Qred_kVAr = Qred_raw * factorQ;
+QsinBESS_kVAr = Qcarga_raw * factorQ;
+
+% Caso con BESS: lo que ve CFE
+P_conBESS_kW = max(Pred_kW,0);
+
+% Caso sin BESS reconstruido
+P_sinBESS_kW = max(Pred_kW + PVSC_kW,0);
+
+% Variables de depuración
+t_ahorros = t;
+Pred_kW_ahorros = Pred_kW;
+PVSC_kW_ahorros = PVSC_kW;
+P_conBESS_kW_ahorros = P_conBESS_kW;
+P_sinBESS_kW_ahorros = P_sinBESS_kW;
+
+fprintf('\n============================================================\n');
+fprintf('CONFIRMACION DE VARIABLES SIL\n');
+fprintf('============================================================\n');
+fprintf('Variable base usada: data4\n');
+fprintf('Tiempo: columna 1\n');
+fprintf('P_VSC:  columna 7\n');
+fprintf('Pred:   columna 9\n');
+fprintf('Qcarga: columna 25\n');
+fprintf('Qred:   columna 26\n');
+fprintf('Tiempo limitado a 0 <= t <= 24 s\n');
+fprintf('Pred max global = %.2f kW\n', max(Pred_kW));
+fprintf('PVSC max global = %.2f kW\n', max(PVSC_kW));
+fprintf('PVSC min global = %.2f kW\n', min(PVSC_kW));
+fprintf('============================================================\n\n');
+
+%% ============================================================
+% 4. VENTANAS
+%% ============================================================
+
+% Verano
+ver_dia = [0 12];
+
+ver_descarga_punta = [0 1.1];
+ver_carga_base = [2 5];
+ver_carga_intermedia = [5 6.3];
+
+ver_capacidad_punta = [0 1];
+ver_distribucion_global = [0 12];
+
+ver_tarifa_punta = [0 1.1];
+ver_tarifa_base = [1.1 5];
+ver_tarifa_intermedia = [5 12];
+
+% Invierno
+inv_dia = [12 24];
+
+inv_descarga_punta = [12 14.1];
+inv_carga_base = [15 18];
+inv_carga_intermedia = [18 18.9];
+
+% Ajuste solicitado para capacidad:
+inv_capacidad_punta = [12.1 14];
+
+inv_distribucion_global = [12 24];
+
+inv_tarifa_punta = [12 14.1];
+inv_tarifa_base = [14.1 18];
+inv_tarifa_intermedia = [18 24];
+
+fprintf('VENTANA CAPACIDAD VERANO USADA: %.2f a %.2f s\n', ver_capacidad_punta(1), ver_capacidad_punta(2));
+fprintf('VENTANA CAPACIDAD INVIERNO USADA: %.2f a %.2f s\n\n', inv_capacidad_punta(1), inv_capacidad_punta(2));
+
+%% ============================================================
+% 5. CALCULO VERANO
+%% ============================================================
+
+% Energía del BESS
+idx = t >= ver_descarga_punta(1) & t <= ver_descarga_punta(2);
+Edesc_ver_dia = trapz(t(idx)*horas_por_segundo, max(PVSC_kW(idx),0));
+
+idx = t >= ver_carga_base(1) & t <= ver_carga_base(2);
+Ecarga_base_ver_dia = trapz(t(idx)*horas_por_segundo, max(-PVSC_kW(idx),0));
+
+idx = t >= ver_carga_intermedia(1) & t <= ver_carga_intermedia(2);
+Ecarga_int_ver_dia = trapz(t(idx)*horas_por_segundo, max(-PVSC_kW(idx),0));
+
+Edesc_ver_mes = Edesc_ver_dia * dias_mes;
+Ecarga_base_ver_mes = Ecarga_base_ver_dia * dias_mes;
+Ecarga_int_ver_mes = Ecarga_int_ver_dia * dias_mes;
+Ecarga_total_ver_mes = Ecarga_base_ver_mes + Ecarga_int_ver_mes;
+
+RTE_ver = 100 * Edesc_ver_mes / Ecarga_total_ver_mes;
+
+% Energía facturable sin BESS
+idx = t >= ver_tarifa_base(1) & t <= ver_tarifa_base(2);
+Ebase_sin_ver = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+idx = t >= ver_tarifa_intermedia(1) & t <= ver_tarifa_intermedia(2);
+Eint_sin_ver = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+idx = t >= ver_tarifa_punta(1) & t <= ver_tarifa_punta(2);
+Epun_sin_ver = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+% Energía facturable con BESS
+idx = t >= ver_tarifa_base(1) & t <= ver_tarifa_base(2);
+Ebase_con_ver = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+idx = t >= ver_tarifa_intermedia(1) & t <= ver_tarifa_intermedia(2);
+Eint_con_ver = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+idx = t >= ver_tarifa_punta(1) & t <= ver_tarifa_punta(2);
+Epun_con_ver = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+costo_energia_sin_ver = Ebase_sin_ver*tarifa_base + Eint_sin_ver*tarifa_intermedia + Epun_sin_ver*tarifa_punta;
+costo_energia_con_ver = Ebase_con_ver*tarifa_base + Eint_con_ver*tarifa_intermedia + Epun_con_ver*tarifa_punta;
+ahorro_energia_ver = costo_energia_sin_ver - costo_energia_con_ver;
+
+% Capacidad verano
+idx = t >= ver_capacidad_punta(1) & t <= ver_capacidad_punta(2);
+t_tmp = t(idx);
+
+P_tmp = P_sinBESS_kW(idx);
+[Pmax_cap_sin_ver, ii] = max(P_tmp);
+tmax_cap_sin_ver = t_tmp(ii);
+
+P_tmp = P_conBESS_kW(idx);
+[Pmax_cap_con_ver, ii] = max(P_tmp);
+tmax_cap_con_ver = t_tmp(ii);
+
+reduccion_cap_ver = Pmax_cap_sin_ver - Pmax_cap_con_ver;
+costo_cap_sin_ver = Pmax_cap_sin_ver * cargo_capacidad;
+costo_cap_con_ver = Pmax_cap_con_ver * cargo_capacidad;
+ahorro_cap_ver = costo_cap_sin_ver - costo_cap_con_ver;
+
+% Distribución verano
+idx = t >= ver_distribucion_global(1) & t <= ver_distribucion_global(2);
+t_tmp = t(idx);
+
+P_tmp = P_sinBESS_kW(idx);
+[Pmax_dist_sin_ver, ii] = max(P_tmp);
+tmax_dist_sin_ver = t_tmp(ii);
+
+P_tmp = P_conBESS_kW(idx);
+[Pmax_dist_con_ver, ii] = max(P_tmp);
+tmax_dist_con_ver = t_tmp(ii);
+
+reduccion_dist_ver = Pmax_dist_sin_ver - Pmax_dist_con_ver;
+costo_dist_sin_ver = Pmax_dist_sin_ver * cargo_distribucion;
+costo_dist_con_ver = Pmax_dist_con_ver * cargo_distribucion;
+ahorro_dist_ver = costo_dist_sin_ver - costo_dist_con_ver;
+
+% FP verano
+idx = t >= ver_dia(1) & t <= ver_dia(2);
+
+kWh_sin_ver = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+kWh_con_ver = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+kVArh_sin_ver = trapz(t(idx)*horas_por_segundo, abs(QsinBESS_kVAr(idx))) * dias_mes;
+kVArh_con_ver = trapz(t(idx)*horas_por_segundo, abs(Qred_kVAr(idx))) * dias_mes;
+
+FP_sin_ver = kWh_sin_ver / sqrt(kWh_sin_ver^2 + kVArh_sin_ver^2);
+FP_con_ver = kWh_con_ver / sqrt(kWh_con_ver^2 + kVArh_con_ver^2);
+
+baseFP_sin_ver = costo_energia_sin_ver + costo_cap_sin_ver + costo_dist_sin_ver + cargo_fijo;
+baseFP_con_ver = costo_energia_con_ver + costo_cap_con_ver + costo_dist_con_ver + cargo_fijo;
+
+if FP_sin_ver < FP_min
+    cargo_FP_sin_ver = baseFP_sin_ver * (3/5) * ((FP_min/FP_sin_ver)-1);
+else
+    cargo_FP_sin_ver = 0;
+end
+
+if FP_con_ver < FP_min
+    cargo_FP_con_ver = baseFP_con_ver * (3/5) * ((FP_min/FP_con_ver)-1);
+else
+    cargo_FP_con_ver = 0;
+end
+
+ahorro_FP_ver = cargo_FP_sin_ver - cargo_FP_con_ver;
+ahorro_total_ver = ahorro_energia_ver + ahorro_cap_ver + ahorro_dist_ver + ahorro_FP_ver;
+
+%% ============================================================
+% 6. CALCULO INVIERNO
+%% ============================================================
+
+% Energía del BESS
+idx = t >= inv_descarga_punta(1) & t <= inv_descarga_punta(2);
+Edesc_inv_dia = trapz(t(idx)*horas_por_segundo, max(PVSC_kW(idx),0));
+
+idx = t >= inv_carga_base(1) & t <= inv_carga_base(2);
+Ecarga_base_inv_dia = trapz(t(idx)*horas_por_segundo, max(-PVSC_kW(idx),0));
+
+idx = t >= inv_carga_intermedia(1) & t <= inv_carga_intermedia(2);
+Ecarga_int_inv_dia = trapz(t(idx)*horas_por_segundo, max(-PVSC_kW(idx),0));
+
+Edesc_inv_mes = Edesc_inv_dia * dias_mes;
+Ecarga_base_inv_mes = Ecarga_base_inv_dia * dias_mes;
+Ecarga_int_inv_mes = Ecarga_int_inv_dia * dias_mes;
+Ecarga_total_inv_mes = Ecarga_base_inv_mes + Ecarga_int_inv_mes;
+
+RTE_inv = 100 * Edesc_inv_mes / Ecarga_total_inv_mes;
+
+% Energía facturable sin BESS
+idx = t >= inv_tarifa_base(1) & t <= inv_tarifa_base(2);
+Ebase_sin_inv = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+idx = t >= inv_tarifa_intermedia(1) & t <= inv_tarifa_intermedia(2);
+Eint_sin_inv = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+idx = t >= inv_tarifa_punta(1) & t <= inv_tarifa_punta(2);
+Epun_sin_inv = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+
+% Energía facturable con BESS
+idx = t >= inv_tarifa_base(1) & t <= inv_tarifa_base(2);
+Ebase_con_inv = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+idx = t >= inv_tarifa_intermedia(1) & t <= inv_tarifa_intermedia(2);
+Eint_con_inv = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+idx = t >= inv_tarifa_punta(1) & t <= inv_tarifa_punta(2);
+Epun_con_inv = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+costo_energia_sin_inv = Ebase_sin_inv*tarifa_base + Eint_sin_inv*tarifa_intermedia + Epun_sin_inv*tarifa_punta;
+costo_energia_con_inv = Ebase_con_inv*tarifa_base + Eint_con_inv*tarifa_intermedia + Epun_con_inv*tarifa_punta;
+ahorro_energia_inv = costo_energia_sin_inv - costo_energia_con_inv;
+
+% Capacidad invierno
+idx = t >= inv_capacidad_punta(1) & t <= inv_capacidad_punta(2);
+t_tmp = t(idx);
+
+P_tmp = P_sinBESS_kW(idx);
+[Pmax_cap_sin_inv, ii] = max(P_tmp);
+tmax_cap_sin_inv = t_tmp(ii);
+
+P_tmp = P_conBESS_kW(idx);
+[Pmax_cap_con_inv, ii] = max(P_tmp);
+tmax_cap_con_inv = t_tmp(ii);
+
+reduccion_cap_inv = Pmax_cap_sin_inv - Pmax_cap_con_inv;
+costo_cap_sin_inv = Pmax_cap_sin_inv * cargo_capacidad;
+costo_cap_con_inv = Pmax_cap_con_inv * cargo_capacidad;
+ahorro_cap_inv = costo_cap_sin_inv - costo_cap_con_inv;
+
+% Distribución invierno
+idx = t >= inv_distribucion_global(1) & t <= inv_distribucion_global(2);
+t_tmp = t(idx);
+
+P_tmp = P_sinBESS_kW(idx);
+[Pmax_dist_sin_inv, ii] = max(P_tmp);
+tmax_dist_sin_inv = t_tmp(ii);
+
+P_tmp = P_conBESS_kW(idx);
+[Pmax_dist_con_inv, ii] = max(P_tmp);
+tmax_dist_con_inv = t_tmp(ii);
+
+reduccion_dist_inv = Pmax_dist_sin_inv - Pmax_dist_con_inv;
+costo_dist_sin_inv = Pmax_dist_sin_inv * cargo_distribucion;
+costo_dist_con_inv = Pmax_dist_con_inv * cargo_distribucion;
+ahorro_dist_inv = costo_dist_sin_inv - costo_dist_con_inv;
+
+% FP invierno
+idx = t >= inv_dia(1) & t <= inv_dia(2);
+
+kWh_sin_inv = trapz(t(idx)*horas_por_segundo, P_sinBESS_kW(idx)) * dias_mes;
+kWh_con_inv = trapz(t(idx)*horas_por_segundo, P_conBESS_kW(idx)) * dias_mes;
+
+kVArh_sin_inv = trapz(t(idx)*horas_por_segundo, abs(QsinBESS_kVAr(idx))) * dias_mes;
+kVArh_con_inv = trapz(t(idx)*horas_por_segundo, abs(Qred_kVAr(idx))) * dias_mes;
+
+FP_sin_inv = kWh_sin_inv / sqrt(kWh_sin_inv^2 + kVArh_sin_inv^2);
+FP_con_inv = kWh_con_inv / sqrt(kWh_con_inv^2 + kVArh_con_inv^2);
+
+baseFP_sin_inv = costo_energia_sin_inv + costo_cap_sin_inv + costo_dist_sin_inv + cargo_fijo;
+baseFP_con_inv = costo_energia_con_inv + costo_cap_con_inv + costo_dist_con_inv + cargo_fijo;
+
+if FP_sin_inv < FP_min
+    cargo_FP_sin_inv = baseFP_sin_inv * (3/5) * ((FP_min/FP_sin_inv)-1);
+else
+    cargo_FP_sin_inv = 0;
+end
+
+if FP_con_inv < FP_min
+    cargo_FP_con_inv = baseFP_con_inv * (3/5) * ((FP_min/FP_con_inv)-1);
+else
+    cargo_FP_con_inv = 0;
+end
+
+ahorro_FP_inv = cargo_FP_sin_inv - cargo_FP_con_inv;
+ahorro_total_inv = ahorro_energia_inv + ahorro_cap_inv + ahorro_dist_inv + ahorro_FP_inv;
+
+%% ============================================================
+% 7. TOTAL
+%% ============================================================
+
+Edesc_total_mes = Edesc_ver_mes + Edesc_inv_mes;
+Ecarga_base_total_mes = Ecarga_base_ver_mes + Ecarga_base_inv_mes;
+Ecarga_int_total_mes = Ecarga_int_ver_mes + Ecarga_int_inv_mes;
+Ecarga_total_mes = Ecarga_total_ver_mes + Ecarga_total_inv_mes;
+
+RTE_total = 100 * Edesc_total_mes / Ecarga_total_mes;
+
+ahorro_energia_total = ahorro_energia_ver + ahorro_energia_inv;
+ahorro_cap_total = ahorro_cap_ver + ahorro_cap_inv;
+ahorro_dist_total = ahorro_dist_ver + ahorro_dist_inv;
+ahorro_FP_total = ahorro_FP_ver + ahorro_FP_inv;
+ahorro_total = ahorro_total_ver + ahorro_total_inv;
+
+%% ============================================================
+% 8. ESTRUCTURA R
+%% ============================================================
+
+R.verano.ahorro_energia_MXN = ahorro_energia_ver;
+R.verano.ahorro_capacidad_MXN = ahorro_cap_ver;
+R.verano.ahorro_distribucion_MXN = ahorro_dist_ver;
+R.verano.ahorro_FP_MXN = ahorro_FP_ver;
+R.verano.ahorro_total_MXN = ahorro_total_ver;
+R.verano.Pmax_cap_sin_kW = Pmax_cap_sin_ver;
+R.verano.Pmax_cap_con_kW = Pmax_cap_con_ver;
+R.verano.tmax_cap_sin = tmax_cap_sin_ver;
+R.verano.tmax_cap_con = tmax_cap_con_ver;
+R.verano.energia_descargada_punta_kWh = Edesc_ver_mes;
+R.verano.energia_carga_base_kWh = Ecarga_base_ver_mes;
+R.verano.energia_carga_intermedia_kWh = Ecarga_int_ver_mes;
+R.verano.energia_cargada_total_kWh = Ecarga_total_ver_mes;
+R.verano.RTE_pct = RTE_ver;
+
+R.invierno.ahorro_energia_MXN = ahorro_energia_inv;
+R.invierno.ahorro_capacidad_MXN = ahorro_cap_inv;
+R.invierno.ahorro_distribucion_MXN = ahorro_dist_inv;
+R.invierno.ahorro_FP_MXN = ahorro_FP_inv;
+R.invierno.ahorro_total_MXN = ahorro_total_inv;
+R.invierno.Pmax_cap_sin_kW = Pmax_cap_sin_inv;
+R.invierno.Pmax_cap_con_kW = Pmax_cap_con_inv;
+R.invierno.tmax_cap_sin = tmax_cap_sin_inv;
+R.invierno.tmax_cap_con = tmax_cap_con_inv;
+R.invierno.energia_descargada_punta_kWh = Edesc_inv_mes;
+R.invierno.energia_carga_base_kWh = Ecarga_base_inv_mes;
+R.invierno.energia_carga_intermedia_kWh = Ecarga_int_inv_mes;
+R.invierno.energia_cargada_total_kWh = Ecarga_total_inv_mes;
+R.invierno.RTE_pct = RTE_inv;
+
+R.total.ahorro_energia_MXN = ahorro_energia_total;
+R.total.ahorro_capacidad_MXN = ahorro_cap_total;
+R.total.ahorro_distribucion_MXN = ahorro_dist_total;
+R.total.ahorro_FP_MXN = ahorro_FP_total;
+R.total.ahorro_total_MXN = ahorro_total;
+R.total.energia_descargada_punta_kWh = Edesc_total_mes;
+R.total.energia_carga_base_kWh = Ecarga_base_total_mes;
+R.total.energia_carga_intermedia_kWh = Ecarga_int_total_mes;
+R.total.energia_cargada_total_kWh = Ecarga_total_mes;
+R.total.RTE_pct = RTE_total;
+
+%% ============================================================
+% 9. DEBUG DIRECTO
+%% ============================================================
+
+fprintf('\n============================================================\n');
+fprintf('DEBUG DIRECTO DE CAPACIDAD\n');
+fprintf('============================================================\n');
+fprintf('Ventana invierno capacidad usada: %.2f a %.2f s\n', inv_capacidad_punta(1), inv_capacidad_punta(2));
+fprintf('Invierno Pmax con BESS = %.2f kW en t = %.12f s\n', Pmax_cap_con_inv, tmax_cap_con_inv);
+fprintf('Invierno Pmax sin BESS = %.2f kW en t = %.12f s\n', Pmax_cap_sin_inv, tmax_cap_sin_inv);
+
+idx_debug = t >= inv_capacidad_punta(1) & t <= inv_capacidad_punta(2);
+fprintf('Max directo Pred col 9 en ventana invierno = %.2f kW\n', max(Pred_kW(idx_debug)));
+fprintf('Max directo P_conBESS en ventana invierno = %.2f kW\n', max(P_conBESS_kW(idx_debug)));
+fprintf('Max directo P_sinBESS en ventana invierno = %.2f kW\n', max(P_sinBESS_kW(idx_debug)));
+fprintf('============================================================\n\n');
+
+%% ============================================================
+% 10. IMPRESION DE RESULTADOS
+%% ============================================================
+
+fprintf('\n============================================================\n');
+fprintf('RESUMEN DE AHORROS POTENCIALES - GDMTH SIL\n');
+fprintf('1 s = %.2f h reales | Extrapolacion = %d dias\n', horas_por_segundo, dias_mes);
+fprintf('============================================================\n\n');
+
+fprintf('-------------------- VERANO --------------------\n');
+fprintf('Energia descargada punta:          %s kWh/mes\n', char(fmtNum.format(Edesc_ver_mes)));
+fprintf('Energia cargada base:              %s kWh/mes\n', char(fmtNum.format(Ecarga_base_ver_mes)));
+fprintf('Energia cargada intermedia:        %s kWh/mes\n', char(fmtNum.format(Ecarga_int_ver_mes)));
+fprintf('Energia cargada total:             %s kWh/mes\n', char(fmtNum.format(Ecarga_total_ver_mes)));
+fprintf('RTE equivalente:                   %.2f %%\n\n', RTE_ver);
+
+fprintf('Pmax punta sin BESS:               %.2f kW\n', Pmax_cap_sin_ver);
+fprintf('Pmax punta con BESS:               %.2f kW\n', Pmax_cap_con_ver);
+fprintf('Reduccion capacidad:               %.2f kW\n\n', reduccion_cap_ver);
+
+fprintf('Ahorro energia:                    %s MXN/mes\n', char(fmtMoney.format(ahorro_energia_ver)));
+fprintf('Ahorro capacidad:                  %s MXN/mes\n', char(fmtMoney.format(ahorro_cap_ver)));
+fprintf('Ahorro distribucion:               %s MXN/mes\n', char(fmtMoney.format(ahorro_dist_ver)));
+fprintf('Ahorro FP:                         %s MXN/mes\n', char(fmtMoney.format(ahorro_FP_ver)));
+fprintf('Ahorro total:                      %s MXN/mes\n\n', char(fmtMoney.format(ahorro_total_ver)));
+
+fprintf('-------------------- INVIERNO --------------------\n');
+fprintf('Energia descargada punta:          %s kWh/mes\n', char(fmtNum.format(Edesc_inv_mes)));
+fprintf('Energia cargada base:              %s kWh/mes\n', char(fmtNum.format(Ecarga_base_inv_mes)));
+fprintf('Energia cargada intermedia:        %s kWh/mes\n', char(fmtNum.format(Ecarga_int_inv_mes)));
+fprintf('Energia cargada total:             %s kWh/mes\n', char(fmtNum.format(Ecarga_total_inv_mes)));
+fprintf('RTE equivalente:                   %.2f %%\n\n', RTE_inv);
+
+fprintf('Pmax punta sin BESS:               %.2f kW\n', Pmax_cap_sin_inv);
+fprintf('Pmax punta con BESS:               %.2f kW\n', Pmax_cap_con_inv);
+fprintf('Reduccion capacidad:               %.2f kW\n\n', reduccion_cap_inv);
+
+fprintf('Ahorro energia:                    %s MXN/mes\n', char(fmtMoney.format(ahorro_energia_inv)));
+fprintf('Ahorro capacidad:                  %s MXN/mes\n', char(fmtMoney.format(ahorro_cap_inv)));
+fprintf('Ahorro distribucion:               %s MXN/mes\n', char(fmtMoney.format(ahorro_dist_inv)));
+fprintf('Ahorro FP:                         %s MXN/mes\n', char(fmtMoney.format(ahorro_FP_inv)));
+fprintf('Ahorro total:                      %s MXN/mes\n\n', char(fmtMoney.format(ahorro_total_inv)));
+
+fprintf('-------------------- TOTAL --------------------\n');
+fprintf('Ahorro energia:                    %s MXN/mes\n', char(fmtMoney.format(ahorro_energia_total)));
+fprintf('Ahorro capacidad:                  %s MXN/mes\n', char(fmtMoney.format(ahorro_cap_total)));
+fprintf('Ahorro distribucion:               %s MXN/mes\n', char(fmtMoney.format(ahorro_dist_total)));
+fprintf('Ahorro FP:                         %s MXN/mes\n', char(fmtMoney.format(ahorro_FP_total)));
+fprintf('AHORRO TOTAL:                      %s MXN/mes\n', char(fmtMoney.format(ahorro_total)));
+fprintf('============================================================\n\n');
+
+%% ============================================================
+% 11. TABLA RESUMEN
+%% ============================================================
+
+Caso = {'Verano'; 'Invierno'; 'Total'};
+Energia = {char(fmtMoney.format(ahorro_energia_ver)); char(fmtMoney.format(ahorro_energia_inv)); char(fmtMoney.format(ahorro_energia_total))};
+Capacidad = {char(fmtMoney.format(ahorro_cap_ver)); char(fmtMoney.format(ahorro_cap_inv)); char(fmtMoney.format(ahorro_cap_total))};
+Distribucion = {char(fmtMoney.format(ahorro_dist_ver)); char(fmtMoney.format(ahorro_dist_inv)); char(fmtMoney.format(ahorro_dist_total))};
+Factor_Potencia = {char(fmtMoney.format(ahorro_FP_ver)); char(fmtMoney.format(ahorro_FP_inv)); char(fmtMoney.format(ahorro_FP_total))};
+Total = {char(fmtMoney.format(ahorro_total_ver)); char(fmtMoney.format(ahorro_total_inv)); char(fmtMoney.format(ahorro_total))};
+
+Tabla_Ahorros = table(Caso, Energia, Capacidad, Distribucion, Factor_Potencia, Total);
+disp(Tabla_Ahorros)
+
+%% ============================================================
+% 12. GRAFICA 1 - AHORROS
+%% ============================================================
+
+Y = [
+    ahorro_energia_ver, ahorro_cap_ver, ahorro_dist_ver, ahorro_FP_ver, ahorro_total_ver;
+    ahorro_energia_inv, ahorro_cap_inv, ahorro_dist_inv, ahorro_FP_inv, ahorro_total_inv;
+    ahorro_energia_total, ahorro_cap_total, ahorro_dist_total, ahorro_FP_total, ahorro_total
+];
+
+figure('Color','w','Name','Fig 1 - Desglose de ahorros por concepto');
+set(gcf,'Units','centimeters','Position',[2 2 34 15]);
+
+b = bar(Y,'grouped');
+b(1).FaceColor = azul;
+b(2).FaceColor = naranja;
+b(3).FaceColor = rojo;
+b(4).FaceColor = verde;
+b(5).FaceColor = morado;
+
+hold on
+grid on
+box on
+
+set(gca, ...
+    'XTickLabel',{'Verano','Invierno','Total'}, ...
+    'FontName',fontName, ...
+    'FontSize',fontSize, ...
+    'FontWeight','bold', ...
+    'LineWidth',axisLineWidth);
+
+ylabel('Ahorro mensual [MXN]', ...
+    'FontName',fontName, ...
+    'FontSize',fontSize, ...
+    'FontWeight','bold');
+
+title('Desglose de ahorros mensuales por componente tarifario', ...
+    'FontName',fontName, ...
+    'FontSize',fontSize+1, ...
+    'FontWeight','bold');
+
+h0 = plot(xlim,[0 0],'k','LineWidth',1.1);
+set(get(get(h0,'Annotation'),'LegendInformation'),'IconDisplayStyle','off');
+
+legend(b, {'Energía','Capacidad','Distribución','Factor de potencia','Total'}, ...
+    'Location','northoutside', ...
+    'Orientation','horizontal', ...
+    'FontName',fontName, ...
+    'FontSize',11);
+
+yMin = min([0; Y(:)]);
+yMax = max([0; Y(:)]);
+margen = 0.18*(yMax-yMin);
+ylim([yMin-margen yMax+margen]);
+
+[nGrupos,nBarras] = size(Y);
+groupwidth = min(0.8, nBarras/(nBarras+1.5));
+offset = 0.025*(yMax-yMin);
+
+for i = 1:nGrupos
+    for j = 1:nBarras
+        x = i - groupwidth/2 + (2*j-1)*groupwidth/(2*nBarras);
+        y = Y(i,j);
+
+        if y >= 0
+            ytxt = y + offset;
+            va = 'bottom';
+        else
+            ytxt = y - offset;
+            va = 'top';
+        end
+
+        text(x,ytxt,char(fmtMoney.format(y)), ...
+            'HorizontalAlignment','center', ...
+            'VerticalAlignment',va, ...
+            'FontName',fontName, ...
+            'FontSize',9, ...
+            'FontWeight','bold');
+    end
+end
+
+yt = get(gca,'YTick');
+yt_labels = cell(size(yt));
+for i = 1:length(yt)
+    yt_labels{i} = char(fmtMoney.format(yt(i)));
+end
+set(gca,'YTickLabel',yt_labels);
+
+if guardar_figuras
+    archivo = fullfile(carpeta_figuras,'Fig01_Desglose_Ahorros_SIL.png');
+    set(gcf,'PaperPositionMode','auto');
+    print(gcf,archivo,'-dpng','-r300');
+    fprintf('Figura guardada: %s\n', archivo);
+end
+
+%% ============================================================
+% 13. GRAFICA 2 - BALANCE ENERGETICO
+%% ============================================================
+
+Y2 = [
+    Edesc_ver_mes, Ecarga_base_ver_mes, Ecarga_int_ver_mes;
+    Edesc_inv_mes, Ecarga_base_inv_mes, Ecarga_int_inv_mes;
+    Edesc_total_mes, Ecarga_base_total_mes, Ecarga_int_total_mes
+];
+
+figure('Color','w','Name','Fig 2 - Balance energetico mensual');
+set(gcf,'Units','centimeters','Position',[2 2 34 15]);
+
+b = bar(Y2,'grouped');
+b(1).FaceColor = azul;
+b(2).FaceColor = naranja;
+b(3).FaceColor = amarillo;
+
+hold on
+grid on
+box on
+
+set(gca, ...
+    'XTickLabel',{'Verano','Invierno','Total'}, ...
+    'FontName',fontName, ...
+    'FontSize',fontSize, ...
+    'FontWeight','bold', ...
+    'LineWidth',axisLineWidth);
+
+ylabel('Energía mensual [kWh]', ...
+    'FontName',fontName, ...
+    'FontSize',fontSize, ...
+    'FontWeight','bold');
+
+title('Balance energético mensual del BESS por periodo tarifario', ...
+    'FontName',fontName, ...
+    'FontSize',fontSize+1, ...
+    'FontWeight','bold');
+
+legend(b, {'Descarga en punta','Carga en base','Carga en intermedia'}, ...
+    'Location','northoutside', ...
+    'Orientation','horizontal', ...
+    'FontName',fontName, ...
+    'FontSize',11);
+
+yMin = 0;
+yMax = max(Y2(:));
+margen = 0.18*(yMax-yMin);
+ylim([0 yMax+margen]);
+
+[nGrupos,nBarras] = size(Y2);
+groupwidth = min(0.8, nBarras/(nBarras+1.5));
+offset = 0.025*(yMax-yMin);
+
+for i = 1:nGrupos
+    for j = 1:nBarras
+        x = i - groupwidth/2 + (2*j-1)*groupwidth/(2*nBarras);
+        y = Y2(i,j);
+
+        text(x,y+offset,char(fmtNum.format(y)), ...
+            'HorizontalAlignment','center', ...
+            'VerticalAlignment','bottom', ...
+            'FontName',fontName, ...
+            'FontSize',9, ...
+            'FontWeight','bold');
+    end
+end
+
+yt = get(gca,'YTick');
+yt_labels = cell(size(yt));
+for i = 1:length(yt)
+    yt_labels{i} = char(fmtNum.format(yt(i)));
+end
+set(gca,'YTickLabel',yt_labels);
+
+if guardar_figuras
+    archivo = fullfile(carpeta_figuras,'Fig02_Balance_Energetico_SIL.png');
+    set(gcf,'PaperPositionMode','auto');
+    print(gcf,archivo,'-dpng','-r300');
+    fprintf('Figura guardada: %s\n', archivo);
+end
