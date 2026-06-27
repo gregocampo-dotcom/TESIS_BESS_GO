@@ -1,0 +1,276 @@
+function [Pref, Pref_raw, scen, soc_offset_pct] = scenario_pref_EMS_discrete( ...
+    t_sim_s, soc, demandW, season, Tramp, Pcon, Ts_EMS)
+
+% ============================================================
+% EMS discreto SOLO ACTIVA
+%
+% Secuencia fija por tiempo:
+%   0  <= t < 12 s  -> season 1: verano
+%   12 <= t < 24 s  -> season 2: invierno
+%   t >= 24 s       -> paro total
+%
+% Convención:
+% Pref > 0  -> BESS descarga / entrega potencia activa
+% Pref < 0  -> BESS carga / absorbe potencia activa
+% ============================================================
+
+% ========= 1) Saneamiento =========
+soc = min(max(soc,0),100);
+
+if ~isscalar(t_sim_s)
+    t_sim_s = t_sim_s(1);
+end
+
+if ~isscalar(soc)
+    soc = soc(1);
+end
+
+if ~isscalar(demandW)
+    demandW = demandW(1);
+end
+
+if ~isscalar(Tramp)
+    Tramp = Tramp(1);
+end
+
+if ~isscalar(Pcon)
+    Pcon = Pcon(1);
+end
+
+if ~isscalar(Ts_EMS)
+    Ts_EMS = Ts_EMS(1);
+end
+
+if Ts_EMS <= 0
+    Ts_EMS = 0.01;
+end
+
+if Tramp <= 0
+    Tramp = Ts_EMS;
+end
+
+% El input season ya NO se usa.
+% Se deja solo para no romper el bloque en Simulink.
+season = season;
+
+% ========= 2) Tiempo global cuantizado =========
+t_sim_s = max(t_sim_s, 0);
+
+k_time = floor((t_sim_s + 0.5*Ts_EMS) / Ts_EMS);
+t_global = k_time * Ts_EMS;
+
+% ========= 3) Asignación de temporada por tiempo =========
+T_SEASON_1_END = 12;   % fin verano
+T_SEASON_2_END = 24;   % fin invierno / paro total
+
+if t_global < T_SEASON_1_END
+
+    % 0 a 12 s -> verano
+    season_eff = 1;
+    t_local = t_global;
+
+elseif t_global < T_SEASON_2_END
+
+    % 12 a 24 s -> invierno
+    season_eff = 2;
+    t_local = t_global - T_SEASON_1_END;
+
+else
+
+    % después de 24 s -> paro
+    season_eff = 0;
+    t_local = 0;
+
+end
+
+% ========= 4) Ventanas internas de cada temporada =========
+T1_summer_s = 1;     % duración punta verano dentro de season 1
+T1_winter_s = 2;     % duración punta invierno dentro de season 2
+Tstandby_s  = 1;     % standby después de punta
+
+if season_eff == 1
+    T1 = T1_summer_s;
+elseif season_eff == 2
+    T1 = T1_winter_s;
+else
+    T1 = 0;
+end
+
+T2 = T1 + Tstandby_s;
+
+% ========= 5) Parámetros =========
+
+% Límites de carga
+SOC_FAST_LIMIT = 98.0;
+SOC_TOP_LIMIT  = 99.8;
+
+% Standby ultralento
+SOC_STANDBY_MAX = 99.8;
+P_STANDBY_SLOW  = -500;  % W
+
+% Parámetros invierno
+SOC_START_W      = 99.0;
+SOC_TARGET_END_W = 15.0;
+SOC_HARD_MIN_W   = 8.0;
+
+H_DIS_W_s = T1_winter_s;
+
+% Potencia de carga fuerte
+P_fast = -(Pcon - demandW);
+
+if abs(P_fast) < 1e-3
+    P_fast = -1000;
+end
+
+% Potencia de carga mínima fuera de punta después de 98%
+P_top = -3000;   % W
+
+soc_offset_pct = 0;
+
+% ========= 6) Cálculo de Pref_raw =========
+
+if season_eff == 0
+
+    % ========================================================
+    % PARO TOTAL DESPUÉS DE 24 s
+    % ========================================================
+    Pref_raw = 0;
+    scen = 0;
+    soc_offset_pct = 0;
+
+elseif (t_local >= 0) && (t_local < T1)
+
+    % ========================================================
+    % ESCENARIO 1: Punta / descarga
+    % ========================================================
+
+    if season_eff == 1
+
+        % Verano: BESS cubre demanda activa
+        Pref_raw = demandW;
+        scen = 1;
+
+    else
+
+        % ====================================================
+        % Invierno: descarga repartida durante TODA la ventana
+        % ====================================================
+
+        base_factor = 0.65;
+
+        FACTOR_MIN = 0.03;
+        FACTOR_MAX = 0.90;
+
+        % Progreso temporal dentro de la ventana invernal
+        tau = t_local / H_DIS_W_s;
+        tau = max(0, min(1, tau));
+
+        % SOC planeado para este instante
+        soc_plan = SOC_START_W - tau * (SOC_START_W - SOC_TARGET_END_W);
+
+        % Error de SOC respecto al plan
+        soc_error = soc - soc_plan;
+        soc_offset_pct = soc_error;
+
+        % Fracción de tiempo restante
+        time_left_frac = max(1 - tau, 0.02);
+
+        % Fracción de SOC útil restante
+        soc_left_frac = (soc - SOC_TARGET_END_W) / ...
+                        (SOC_START_W - SOC_TARGET_END_W);
+
+        soc_left_frac = max(0, min(1, soc_left_frac));
+
+        % Factor por pacing
+        pacing_ratio = soc_left_frac / time_left_frac;
+        pacing_ratio = max(0, min(1.4, pacing_ratio));
+
+        factor = base_factor * pacing_ratio;
+
+        % Corrección suave por error de SOC
+        Ksoc = 0.015;
+        factor = factor + Ksoc * soc_error;
+
+        % Saturación del factor
+        factor = max(FACTOR_MIN, min(FACTOR_MAX, factor));
+
+        % Seguridad absoluta
+        if soc <= SOC_HARD_MIN_W
+            Pref_raw = 0;
+        else
+            Pref_raw = factor * demandW;
+        end
+
+        scen = 1;
+
+    end
+
+elseif (t_local >= T1) && (t_local < T2)
+
+    % ========================================================
+    % ESCENARIO 2: Standby con carga ultralenta
+    % ========================================================
+
+    if soc < SOC_STANDBY_MAX
+        Pref_raw = P_STANDBY_SLOW;
+    else
+        Pref_raw = 0;
+    end
+
+    scen = 2;
+
+else
+
+    % ========================================================
+    % ESCENARIO 3/4: Carga fuera de punta
+    % ========================================================
+
+    if soc < SOC_FAST_LIMIT
+
+        Pref_raw = P_fast;
+        scen = 3;
+
+    elseif soc >= SOC_FAST_LIMIT && soc < SOC_TOP_LIMIT
+
+        Pref_raw = P_top;
+        scen = 4;
+
+    else
+
+        Pref_raw = 0;
+        scen = 4;
+
+    end
+
+end
+
+% ========= 7) Rampa discreta =========
+persistent Pref_zoh
+
+if isempty(Pref_zoh)
+    Pref_zoh = 0;
+end
+
+% Reset al inicio de la simulación
+if k_time == 0
+    Pref_zoh = 0;
+end
+
+% Si terminó la ventana total, forzar paro sin cola de rampa
+if season_eff == 0
+    Pref_zoh = 0;
+    Pref = 0;
+    Pref_raw = 0;
+    scen = 0;
+    soc_offset_pct = 0;
+    return;
+end
+
+alpha = Ts_EMS / max(Tramp, Ts_EMS);
+alpha = min(max(alpha, 0), 1);
+
+Pref_zoh = Pref_zoh + alpha * (Pref_raw - Pref_zoh);
+
+Pref = Pref_zoh;
+
+end
