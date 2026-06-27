@@ -1,0 +1,496 @@
+clear; clc;
+
+%% ============================================================
+% Kv PARA GFM - PROTOTIPO 32.4 W, 36 Vdc, 18 VLL rms
+%
+% Este script calcula:
+%   1) Kv_pp  por colocación de polos
+%   2) Kv_lqr por LQR
+%   3) Kp_i y Ki_i del lazo interno de corriente sin depender de Rf
+%
+% También calcula límites para:
+%   - vCdot_des
+%   - iL_ref
+%   - Pdc instantánea
+%   - Idc
+%   - voltaje máximo dq
+%
+% Prototipo:
+%   Pnom     = 32.4 W
+%   Vdc      = 36 V
+%   VLL_rms  = 18 V
+%   Lf       = 10 mH
+%   Cf       = 1100 uF
+%% ============================================================
+
+%% ============================================================
+% 1. Parámetros base
+%% ============================================================
+
+Ts = 2e-6;          % Paso de simulación
+f  = 60;            % Frecuencia fundamental
+w  = 2*pi*f;
+
+fs = 10000;         % Frecuencia de conmutación
+
+Pnom = 32.4;        % W
+Vdc  = 36;          % V
+
+VLL_rms = 18;       % V línea-línea RMS
+
+% En dq se usa normalmente valor pico fase-neutro
+Vd_ref  = VLL_rms/sqrt(3)*sqrt(2);
+Vq_ref  = 0;
+
+Lf = 10e-3;         % H
+Rf = 0;             % Ohm. No se usa para el diseño del PI
+Cf = 1100e-6;       % F
+
+% Valores base del prototipo
+I_rms_nom  = Pnom/(sqrt(3)*VLL_rms);
+I_peak_nom = sqrt(2)*I_rms_nom;
+
+Zbase = VLL_rms^2/Pnom;
+X_L   = 2*pi*f*Lf;
+L_pu_equiv = X_L/Zbase;
+
+fprintf('\n================ PARÁMETROS BASE PROTOTIPO ================\n');
+fprintf('Vd_ref       = %.4f V pico fase-neutro\n', Vd_ref);
+fprintf('Vq_ref       = %.4f V\n', Vq_ref);
+fprintf('Pnom         = %.4f W\n', Pnom);
+fprintf('Vdc          = %.4f V\n', Vdc);
+fprintf('VLL_rms      = %.4f V\n', VLL_rms);
+fprintf('I_rms_nom    = %.4f A\n', I_rms_nom);
+fprintf('I_peak_nom   = %.4f A\n', I_peak_nom);
+fprintf('Lf           = %.9e H\n', Lf);
+fprintf('Rf usado     = %.9f ohm\n', Rf);
+fprintf('Cf           = %.9e F\n', Cf);
+fprintf('Zbase        = %.4f ohm\n', Zbase);
+fprintf('X_L @60Hz    = %.4f ohm\n', X_L);
+fprintf('X_L/Zbase    = %.4f pu\n', L_pu_equiv);
+
+%% ============================================================
+% 2. PI del lazo interno de corriente sin depender de Rf
+%% ============================================================
+%
+% Planta aproximada:
+%
+%   Gi(s) = 1/(Lf*s)
+%
+% Con PI:
+%
+%   Ci(s) = Kp_i + Ki_i/s
+%
+% Ecuación característica:
+%
+%   Lf*s^2 + Kp_i*s + Ki_i = 0
+%
+% Comparando con:
+%
+%   s^2 + 2*zeta_i*wi*s + wi^2 = 0
+%
+% Se obtiene:
+%
+%   Kp_i = 2*zeta_i*wi*Lf
+%   Ki_i = wi^2*Lf
+%
+%% ============================================================
+
+fi_i   = 50;        % Hz. Prueba 30, 50, 75, 100
+zeta_i = 0.707;     % Amortiguamiento
+
+wi_i = 2*pi*fi_i;
+
+Kp_i = 2*zeta_i*wi_i*Lf;
+Ki_i = wi_i^2*Lf;
+
+fprintf('\n================ PI INTERNO DE CORRIENTE ================\n');
+fprintf('fi_i   = %.4f Hz\n', fi_i);
+fprintf('zeta_i = %.4f\n', zeta_i);
+fprintf('Kp_i   = %.6f\n', Kp_i);
+fprintf('Ki_i   = %.6f\n', Ki_i);
+
+%% ============================================================
+% 3. Modelo externo de voltaje
+%% ============================================================
+%
+% x_v = [eV_d eV_q etaV_d etaV_q]^T
+%
+% vCdot_des = Kv*x_v
+%
+% Modelo:
+%   e_dot   = -vCdot_des
+%   eta_dot = e
+%
+%% ============================================================
+
+Av = [
+    0 0 0 0;
+    0 0 0 0;
+    1 0 0 0;
+    0 1 0 0
+];
+
+Bv = [
+    1 0;
+    0 1;
+    0 0;
+    0 0
+];
+
+rank_v = rank(ctrb(Av,Bv));
+
+fprintf('\n================ CONTROLABILIDAD ================\n');
+fprintf('Rango externo = %d de %d\n', rank_v, size(Av,1));
+
+%% ============================================================
+% 4. Kv opción 1: colocación de polos
+%% ============================================================
+%
+% vCdot_des = Kpv*eV + Kiv*etaV
+%
+% Dinámica:
+%   s^2 + Kpv*s + Kiv = 0
+%
+% Kpv = 2*zeta_v*wv
+% Kiv = wv^2
+%
+% Para el prototipo conviene que el lazo externo sea más lento
+% que el lazo interno de corriente.
+%
+%% ============================================================
+
+fv_pp    = 5;       % Hz. Prueba 3, 4, 5, 6
+zeta_pp  = 1.2;     % Prueba 1.0, 1.2, 1.4
+
+wv_pp = 2*pi*fv_pp;
+
+Kpv_pp = 2*zeta_pp*wv_pp;
+Kiv_pp = wv_pp^2;
+
+Kv_pp = [
+    Kpv_pp 0      Kiv_pp 0;
+    0      Kpv_pp 0      Kiv_pp
+];
+
+Acl_pp = Av - Bv*Kv_pp;
+eig_pp = eig(Acl_pp);
+
+fprintf('\n================ Kv_pp POR POLOS ================\n');
+fprintf('fv_pp   = %.4f Hz\n', fv_pp);
+fprintf('zeta_pp = %.4f\n', zeta_pp);
+fprintf('Kpv_pp  = %.6f\n', Kpv_pp);
+fprintf('Kiv_pp  = %.6f\n', Kiv_pp);
+fprintf('Kv_pp = \n');
+disp(Kv_pp);
+fprintf('eig_pp = \n');
+disp(eig_pp);
+
+%% ============================================================
+% 5. Kv opción 2: LQR
+%% ============================================================
+%
+% Ajustes principales:
+%
+% fcv_lqr:
+%   menor = más suave
+%   mayor = más rápido
+%
+% Icorr_max_lqr:
+%   representa la corriente máxima permitida para corregir voltaje.
+%   En el prototipo NO debe ser 10, 15 o 25 A.
+%   Debe estar cerca de la corriente nominal pico.
+%
+%% ============================================================
+
+ev_max = 0.05*Vd_ref;       % 5% de error permitido en voltaje
+
+fcv_lqr = 5;                % Hz. Prueba 3, 4, 5, 6
+wcv_lqr = 2*pi*fcv_lqr;
+
+eta_v_max = ev_max/wcv_lqr;
+
+% Corriente máxima de corrección para el lazo externo
+% Nominal pico aprox = 1.47 A
+Icorr_max_lqr = 0.6*I_peak_nom;
+
+vCdot_max_lqr = Icorr_max_lqr/Cf;
+
+Qv = diag([
+    1/ev_max^2, ...
+    1/ev_max^2, ...
+    1/eta_v_max^2, ...
+    1/eta_v_max^2
+]);
+
+Rv = diag([
+    1/vCdot_max_lqr^2, ...
+    1/vCdot_max_lqr^2
+]);
+
+% Ajustes finos:
+% rhoQv > 1: más seguimiento de voltaje
+% rhoRv > 1: menos esfuerzo, más suave
+rhoQv = 1;
+rhoRv = 1;
+
+Qv = rhoQv*Qv;
+Rv = rhoRv*Rv;
+
+Kv_lqr = lqr(Av,Bv,Qv,Rv);
+
+Acl_lqr = Av - Bv*Kv_lqr;
+eig_lqr = eig(Acl_lqr);
+
+fprintf('\n================ Kv_lqr POR LQR ================\n');
+fprintf('fcv_lqr        = %.4f Hz\n', fcv_lqr);
+fprintf('ev_max         = %.4f V\n', ev_max);
+fprintf('eta_v_max      = %.6f V*s\n', eta_v_max);
+fprintf('Icorr_max_lqr  = %.4f A\n', Icorr_max_lqr);
+fprintf('vCdot_max_lqr  = %.4f V/s\n', vCdot_max_lqr);
+fprintf('rhoQv          = %.4f\n', rhoQv);
+fprintf('rhoRv          = %.4f\n', rhoRv);
+fprintf('Kv_lqr = \n');
+disp(Kv_lqr);
+fprintf('eig_lqr = \n');
+disp(eig_lqr);
+
+%% ============================================================
+% 6. Selección de Kv
+%% ============================================================
+%
+% metodo_Kv = 1 -> usa Kv_pp
+% metodo_Kv = 2 -> usa Kv_lqr
+%
+%% ============================================================
+
+metodo_Kv = 2;   % 1 = polos, 2 = LQR
+
+if metodo_Kv == 1
+    Kv = Kv_pp;
+    eig_v = eig_pp;
+    Acl_v = Acl_pp;
+    nombre_Kv = 'POLOS';
+else
+    Kv = Kv_lqr;
+    eig_v = eig_lqr;
+    Acl_v = Acl_lqr;
+    nombre_Kv = 'LQR';
+end
+
+fprintf('\n================ Kv SELECCIONADO ================\n');
+fprintf('Método seleccionado: %s\n', nombre_Kv);
+fprintf('Kv = \n');
+disp(Kv);
+fprintf('eig_v = \n');
+disp(eig_v);
+
+%% ============================================================
+% 7. Soft-start de Vd_ref
+%% ============================================================
+
+Tramp_Vd = 0.7;              % s. Prueba 0.5, 0.7, 1.0
+slope_Vd = Vd_ref/Tramp_Vd;
+
+eta_enable_ratio = 0.90;
+eta_enable_threshold = eta_enable_ratio*Vd_ref;
+
+fprintf('\n================ SOFT START Vd ================\n');
+fprintf('Tramp_Vd = %.4f s\n', Tramp_Vd);
+fprintf('slope_Vd = %.4f V/s\n', slope_Vd);
+fprintf('eta_enable_threshold = %.4f V\n', eta_enable_threshold);
+
+%% ============================================================
+% 8. Límite de vCdot_des
+%% ============================================================
+%
+% Esto limita la salida de Kv:
+%
+%   -vCdot_lim <= vCdot_des_d/q <= vCdot_lim
+%
+% Como:
+%
+%   iC = Cf * vCdot
+%
+% entonces:
+%
+%   vCdot_lim = Icorr_lim_vCdot/Cf
+%
+%% ============================================================
+
+Icorr_lim_vCdot = 0.8*I_peak_nom;     % A
+vCdot_lim = Icorr_lim_vCdot/Cf;       % V/s
+
+fprintf('\n================ LÍMITE vCdot_des ================\n');
+fprintf('Icorr_lim_vCdot = %.4f A\n', Icorr_lim_vCdot);
+fprintf('vCdot_lim        = %.4f V/s\n', vCdot_lim);
+
+%% ============================================================
+% 9. Límites de corriente
+%% ============================================================
+
+% Límite nominal pico
+Imax_nominal = I_peak_nom;
+
+% Límite normal de corriente, con 20% de margen
+Imax_final = 1.2*I_peak_nom;
+
+% Límite conservador para pruebas iniciales
+Imax_small = 1.0*I_peak_nom;
+
+% Selección de límite fijo
+Imax = Imax_small;       % usa Imax_small al inicio; luego prueba Imax_final
+
+fprintf('\n================ LÍMITES DE CORRIENTE ================\n');
+fprintf('I_rms_nom    = %.4f A\n', I_rms_nom);
+fprintf('I_peak_nom   = %.4f A\n', I_peak_nom);
+fprintf('Imax_nominal = %.4f A\n', Imax_nominal);
+fprintf('Imax_final   = %.4f A\n', Imax_final);
+fprintf('Imax_small   = %.4f A\n', Imax_small);
+fprintf('Imax usado   = %.4f A\n', Imax);
+
+%% ============================================================
+% 10. Límites de potencia instantánea DC
+%% ============================================================
+%
+% Pdc = Vdc * Idc
+%
+%% ============================================================
+
+Pdc_nom = Pnom;
+
+Pdc_lim_soft = 0.8*Pnom;
+Pdc_lim_nom  = 1.0*Pnom;
+Pdc_lim_high = 1.2*Pnom;
+
+Pdc_lim = Pdc_lim_nom;
+
+Idc_nom = Pnom/Vdc;
+Idc_lim = Pdc_lim/Vdc;
+
+fprintf('\n================ LÍMITE Pdc / Idc ================\n');
+fprintf('Pdc_nom       = %.4f W\n', Pdc_nom);
+fprintf('Pdc_lim_soft  = %.4f W\n', Pdc_lim_soft);
+fprintf('Pdc_lim_nom   = %.4f W\n', Pdc_lim_nom);
+fprintf('Pdc_lim_high  = %.4f W\n', Pdc_lim_high);
+fprintf('Pdc_lim usado = %.4f W\n', Pdc_lim);
+fprintf('Idc_nom       = %.4f A\n', Idc_nom);
+fprintf('Idc_lim       = %.4f A\n', Idc_lim);
+
+%% ============================================================
+% 11. Límite de potencia AC para referencia de corriente
+%% ============================================================
+%
+% En dq con variables pico:
+%
+%   P ≈ 1.5 * Vd_ref * Id
+%
+% Entonces:
+%
+%   I_from_P = P_limit/(1.5*Vd_ref)
+%
+%% ============================================================
+
+Pac_lim_soft = 0.8*Pnom;
+Pac_lim_nom  = 1.0*Pnom;
+Pac_lim_high = 1.2*Pnom;
+
+Pac_lim = Pac_lim_nom;
+
+I_from_Pac_lim = Pac_lim/(1.5*Vd_ref);
+
+fprintf('\n================ LÍMITE Pac aproximado ================\n');
+fprintf('Pac_lim          = %.4f W\n', Pac_lim);
+fprintf('I_from_Pac_lim   = %.4f A pico dq\n', I_from_Pac_lim);
+
+% Corriente efectiva máxima combinando límite de corriente y límite de potencia
+Iref_lim_combined = min(Imax, I_from_Pac_lim);
+
+fprintf('Iref_lim_combined = %.4f A pico dq\n', Iref_lim_combined);
+
+%% ============================================================
+% 12. Rate limiter para iL_ref
+%% ============================================================
+%
+% Con L = 10 mH y voltajes de fase bajos, no conviene permitir
+% rampas de miles de A/s.
+%
+% Estimación física:
+%
+%   di/dt = vL/L
+%
+% Con Vmax_dq ≈ 18 V:
+%
+%   di/dt max ideal ≈ 18/0.01 = 1800 A/s
+%
+% Para pruebas iniciales se usa algo menor.
+%
+%% ============================================================
+
+diLref_max = 500;      % A/s. Prueba 300, 500, 800
+diLref_min = -500;     % A/s
+
+fprintf('\n================ RATE LIMIT iLref ================\n');
+fprintf('diLref_max = %.4f A/s\n', diLref_max);
+fprintf('diLref_min = %.4f A/s\n', diLref_min);
+
+%% ============================================================
+% 13. Límite de voltaje de modulación
+%% ============================================================
+%
+% Para un inversor de dos niveles con SPWM:
+%
+%   Vfase_pico_max ≈ Vdc/2
+%
+% Con Vdc = 36 V:
+%
+%   Vmax = 18 V pico
+%
+% Tu Vd_ref es aprox 14.7 V, entonces sí hay margen.
+%
+%% ============================================================
+
+Vmax_dq_ideal = Vdc/2;
+Vmax_dq = 0.95*Vmax_dq_ideal;   % margen de seguridad
+
+m_ref = Vd_ref/(Vdc/2);
+
+fprintf('\n================ LÍMITE VOLTAJE dq ================\n');
+fprintf('Vmax_dq_ideal = %.4f V\n', Vmax_dq_ideal);
+fprintf('Vmax_dq usado = %.4f V\n', Vmax_dq);
+fprintf('m_ref aprox   = %.4f\n', m_ref);
+
+%% ============================================================
+% 14. Resumen recomendado
+%% ============================================================
+
+fprintf('\n================ RESUMEN RECOMENDADO ================\n');
+fprintf('Usar inicialmente:\n');
+fprintf('Kp_i = %.6f\n', Kp_i);
+fprintf('Ki_i = %.6f\n', Ki_i);
+fprintf('Kv seleccionado = %s\n', nombre_Kv);
+fprintf('Imax usado = %.4f A pico dq\n', Imax);
+fprintf('Iref_lim_combined = %.4f A pico dq\n', Iref_lim_combined);
+fprintf('Vmax_dq = %.4f V\n', Vmax_dq);
+
+%% ============================================================
+% 15. Guardar
+%% ============================================================
+
+save('Kv_GFM_DOS_OPCIONES_LIMITES_prototipo.mat', ...
+    'Kv','Kv_pp','Kv_lqr','metodo_Kv','nombre_Kv', ...
+    'Av','Bv','Acl_v','Acl_pp','Acl_lqr','eig_v','eig_pp','eig_lqr', ...
+    'fv_pp','zeta_pp','wv_pp','Kpv_pp','Kiv_pp', ...
+    'fcv_lqr','wcv_lqr','ev_max','eta_v_max','Icorr_max_lqr','vCdot_max_lqr', ...
+    'Qv','Rv','rhoQv','rhoRv', ...
+    'Ts','f','w','fs','Pnom','Vdc','VLL_rms','Vd_ref','Vq_ref','Lf','Rf','Cf', ...
+    'I_rms_nom','I_peak_nom','Zbase','X_L','L_pu_equiv', ...
+    'fi_i','zeta_i','wi_i','Kp_i','Ki_i', ...
+    'Tramp_Vd','slope_Vd','eta_enable_ratio','eta_enable_threshold', ...
+    'Icorr_lim_vCdot','vCdot_lim', ...
+    'Imax_nominal','Imax_final','Imax_small','Imax', ...
+    'Pdc_nom','Pdc_lim_soft','Pdc_lim_nom','Pdc_lim_high','Pdc_lim','Idc_nom','Idc_lim', ...
+    'Pac_lim_soft','Pac_lim_nom','Pac_lim_high','Pac_lim','I_from_Pac_lim','Iref_lim_combined', ...
+    'diLref_max','diLref_min','Vmax_dq_ideal','Vmax_dq','m_ref');
+
+fprintf('\nArchivo guardado: Kv_GFM_DOS_OPCIONES_LIMITES_prototipo.mat\n');
